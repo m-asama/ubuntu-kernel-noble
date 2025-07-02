@@ -1643,6 +1643,7 @@ static int netlink_setsockopt(struct socket *sock, int level, int optname,
 	struct sock *sk = sock->sk;
 	struct netlink_sock *nlk = nlk_sk(sk);
 	unsigned int val = 0;
+	int *nsid = (int *)&val;
 	int nr = -1;
 
 	if (level != SOL_NETLINK)
@@ -1705,6 +1706,20 @@ static int netlink_setsockopt(struct socket *sock, int level, int optname,
 	case NETLINK_GET_STRICT_CHK:
 		nr = NETLINK_F_STRICT_CHK;
 		break;
+	case NETLINK_SET_NS_ID: {
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+			return -EPERM;
+		struct net *cur = sock_net(sk);
+		struct net *new = *nsid == -1 ? &init_net : get_net_ns_by_id(sock_net(sk), *nsid);
+		if (!new)
+			return -EINVAL;
+		if (new != cur) {
+			sock_net_set(sk, new);
+			if (cur != &init_net)
+				put_net(cur);
+		}
+		break;
+	}
 	default:
 		return -ENOPROTOOPT;
 	}
