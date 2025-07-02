@@ -2657,7 +2657,7 @@ void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 
 		ndst = &rt->dst;
 		err = skb_tunnel_check_pmtu(skb, ndst, vxlan_headroom(flags & VXLAN_F_GPE),
-					    netif_is_any_bridge_port(dev));
+					    false);
 		if (err < 0) {
 			goto tx_error;
 		} else if (err) {
@@ -2683,6 +2683,7 @@ void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 		if (err < 0)
 			goto tx_error;
 
+		skb->ignore_df = 1;
 		udp_tunnel_xmit_skb(rt, sock4->sock->sk, skb, saddr,
 				    pkey->u.ipv4.dst, tos, ttl, df,
 				    src_port, dst_port, xnet, !udp_sum);
@@ -2716,7 +2717,7 @@ void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 
 		err = skb_tunnel_check_pmtu(skb, ndst,
 					    vxlan_headroom((flags & VXLAN_F_GPE) | VXLAN_F_IPV6),
-					    netif_is_any_bridge_port(dev));
+					    false);
 		if (err < 0) {
 			goto tx_error;
 		} else if (err) {
@@ -2744,6 +2745,7 @@ void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 		if (err < 0)
 			goto tx_error;
 
+		skb->ignore_df = 1;
 		udp_tunnel6_xmit_skb(ndst, sock6->sock->sk, skb, dev,
 				     &saddr, &pkey->u.ipv6.dst, tos, ttl,
 				     pkey->label, src_port, dst_port, !udp_sum);
