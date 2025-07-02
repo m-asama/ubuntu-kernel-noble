@@ -1363,7 +1363,22 @@ static size_t ppp_nl_get_size(const struct net_device *dev)
 
 static int ppp_nl_fill_info(struct sk_buff *skb, const struct net_device *dev)
 {
-	return 0;
+	struct ppp *ppp = netdev_priv(dev);
+	struct ppp_channel *chan;
+	struct channel *pch;
+
+	if (ppp->flags & SC_MULTILINK)
+		return 0;
+
+	if (list_empty(&ppp->channels))
+		return 0;
+
+	pch = list_first_entry(&ppp->channels, struct channel, clist);
+	chan = pch->chan;
+	if (!chan->ops->nl_fill_info)
+		return 0;
+
+	return chan->ops->nl_fill_info(skb, chan);
 }
 
 static struct net *ppp_nl_get_link_net(const struct net_device *dev)

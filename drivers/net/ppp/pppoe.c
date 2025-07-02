@@ -995,9 +995,34 @@ static int pppoe_fill_forward_path(struct net_device_path_ctx *ctx,
 	return 0;
 }
 
+static int pppoe_nl_fill_info(struct sk_buff *skb,
+			      struct ppp_channel *chan)
+{
+	struct sock *sk = chan->private;
+	struct pppox_sock *po = pppox_sk(sk);
+	struct net_device *dev = po->pppoe_dev;
+
+	if (sock_flag(sk, SOCK_DEAD) ||
+	    !(sk->sk_state & PPPOX_CONNECTED) || !dev)
+		return 0;
+
+	if (nla_put_u16(skb, IFLA_PPP_PPPOE_SID, po->pppoe_pa.sid))
+		goto nla_put_failure;
+	if (nla_put(skb, IFLA_PPP_PPPOE_REMOTE, sizeof(po->pppoe_pa.remote), &po->pppoe_pa.remote))
+		goto nla_put_failure;
+	if (nla_put_u32(skb, IFLA_PPP_PPPOE_DEV, po->pppoe_dev->ifindex))
+		goto nla_put_failure;
+
+	return 0;
+
+nla_put_failure:
+	return -EMSGSIZE;
+}
+
 static const struct ppp_channel_ops pppoe_chan_ops = {
 	.start_xmit = pppoe_xmit,
 	.fill_forward_path = pppoe_fill_forward_path,
+	.nl_fill_info = pppoe_nl_fill_info,
 };
 
 static int pppoe_recvmsg(struct socket *sock, struct msghdr *m,
