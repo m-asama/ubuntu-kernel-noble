@@ -97,18 +97,50 @@ out:
 static void esp4_gso_encap(struct xfrm_state *x, struct sk_buff *skb)
 {
 	struct ip_esp_hdr *esph;
+	struct udphdr *uh;
 	struct iphdr *iph = ip_hdr(skb);
 	struct xfrm_offload *xo = xfrm_offload(skb);
 	int proto = iph->protocol;
+	__be16 sport, dport;
+	int encap_type;
 
 	skb_push(skb, -skb_network_offset(skb));
 	esph = ip_esp_hdr(skb);
 	*skb_mac_header(skb) = IPPROTO_ESP;
 
+	if (x->encap) {
+		spin_lock_bh(&x->lock);
+		sport = x->encap->encap_sport;
+		dport = x->encap->encap_dport;
+		encap_type = x->encap->encap_type;
+		spin_unlock_bh(&x->lock);
+		switch (encap_type) {
+		default:
+		case UDP_ENCAP_ESPINUDP:
+		case UDP_ENCAP_ESPINUDP_NON_IKE:
+			uh = (struct udphdr *)ip_esp_hdr(skb);
+			uh->source = sport;
+			uh->dest = dport;
+			uh->len = htons(skb->len - skb_transport_offset(skb));
+			uh->check = 0;
+			esph = (struct ip_esp_hdr *)(uh + 1);
+			*skb_mac_header(skb) = IPPROTO_UDP;
+			break;
+		case TCP_ENCAP_ESPINTCP:
+			break;
+		}
+	}
+
 	esph->spi = x->id.spi;
 	esph->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output.low);
 
 	xo->proto = proto;
+
+	if (x->xso.dev) {
+		skb->gdp_xo_nsid = peernet2id(&init_net, dev_net(x->xso.dev));
+		skb->gdp_xo_link = x->xso.dev->ifindex;
+		skb->gdp_xo_esphp = (unsigned char *)esph;
+	}
 }
 
 static struct sk_buff *xfrm4_tunnel_gso_segment(struct xfrm_state *x,

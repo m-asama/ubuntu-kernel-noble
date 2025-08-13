@@ -928,6 +928,14 @@ struct sk_buff {
 	__u8			active_extensions;
 #endif
 
+	/* gdp: for kernel to gdp */
+	int			gdp_xo_nsid;
+	int			gdp_xo_link;
+	unsigned char		*gdp_xo_esphp;
+	/* gdp: for gdp to kernel */
+	__u32			gdp_xo_flags;
+	__u32			gdp_xo_status;
+
 	/* Fields enclosed in headers group are copied
 	 * using a single memcpy() in __copy_skb_header()
 	 */

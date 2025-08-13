@@ -77,6 +77,8 @@
 #include <net/ax25.h>
 #include <net/rose.h>
 #include <net/6lowpan.h>
+#include <net/xfrm.h>
+#include <net/esp.h>
 
 #include <linux/uaccess.h>
 #include <linux/proc_fs.h>
@@ -189,6 +191,7 @@ struct tun_struct {
 
 	int			align;
 	int			vnet_hdr_sz;
+	int			gdp;
 	int			sndbuf;
 	struct tap_filter	txflt;
 	struct sock_fprog	fprog;
@@ -1370,6 +1373,41 @@ static void tun_flow_uninit(struct tun_struct *tun)
 	tun_flow_flush(tun);
 }
 
+static int tap_xfrmdev_state_add(struct xfrm_state *x, struct netlink_ext_ack *extack)
+{
+	return 0;
+}
+
+static void tap_xfrmdev_state_delete(struct xfrm_state *x)
+{
+}
+
+static void tap_xfrmdev_state_free(struct xfrm_state *x)
+{
+}
+
+static bool tap_xfrmdev_offload_ok(struct sk_buff *skb, struct xfrm_state *x)
+{
+	return true;
+}
+
+static void tap_xfrmdev_state_advance_esn(struct xfrm_state *x)
+{
+}
+
+static void tap_xfrmdev_state_update_curlft(struct xfrm_state *x)
+{
+}
+
+static const struct xfrmdev_ops tap_xfrmdev_ops = {
+	.xdo_dev_state_add		= tap_xfrmdev_state_add,
+	.xdo_dev_state_delete		= tap_xfrmdev_state_delete,
+	.xdo_dev_state_free		= tap_xfrmdev_state_free,
+	.xdo_dev_offload_ok		= tap_xfrmdev_offload_ok,
+	.xdo_dev_state_advance_esn	= tap_xfrmdev_state_advance_esn,
+	.xdo_dev_state_update_curlft	= tap_xfrmdev_state_update_curlft,
+};
+
 #define MIN_MTU 68
 #define MAX_MTU 65535
 
@@ -1395,6 +1433,9 @@ static void tun_net_initialize(struct net_device *dev)
 
 	case IFF_TAP:
 		dev->netdev_ops = &tap_netdev_ops;
+		dev->xfrmdev_ops = &tap_xfrmdev_ops;
+		dev->hw_features |= NETIF_F_HW_ESP;
+		dev->hw_enc_features |= NETIF_F_HW_ESP;
 		/* Ethernet TAP Device */
 		ether_setup(dev);
 		dev->priv_flags &= ~IFF_TX_SKB_SHARING;
@@ -1746,12 +1787,68 @@ out:
 	return NULL;
 }
 
+static void tap_ipsec_rx(struct tun_struct *tun, struct sk_buff *skb)
+{
+	struct sec_path *sp;
+	struct xfrm_offload *xo = NULL;
+	struct xfrm_state *xs = NULL;
+	struct ip_esp_hdr *esph = NULL;
+	uint8_t protocol = 0;
+	unsigned short family = 0;
+
+	switch (ntohs(skb->protocol)) {
+	case ETH_P_IP:
+		family = AF_INET;
+		protocol = ip_hdr(skb)->protocol;
+		break;
+	case ETH_P_IPV6:
+		family = AF_INET6;
+		protocol = ipv6_hdr(skb)->nexthdr;
+		break;
+	default:
+		return;
+	}
+
+	esph = ip_esp_hdr(skb);
+	if (protocol == IPPROTO_UDP) {
+		struct udphdr *udph = (struct udphdr *)esph;
+		/* XXX: */
+		if (ntohs(udph->source) != 4500 && ntohs(udph->dest) != 4500)
+			return;
+		esph = (struct ip_esp_hdr *)(udph + 1);
+		protocol = IPPROTO_ESP;
+	}
+
+	if (protocol != IPPROTO_ESP)
+		return;
+
+	xs = xfrm_state_lookup_byspi(dev_net(tun->dev), esph->spi, family);
+	if (unlikely(!xs))
+		return;
+	if (xs->xso.type != XFRM_DEV_OFFLOAD_CRYPTO)
+		return;
+	if (xs->xso.dev != tun->dev)
+		return;
+	xfrm_state_hold(xs);
+	sp = secpath_set(skb);
+	if (unlikely(!sp)) {
+		xfrm_state_put(xs);
+		return;
+	}
+	sp->xvec[sp->len++] = xs;
+	sp->olen++;
+	xo = xfrm_offload(skb);
+	xo->flags = skb->gdp_xo_flags;
+	xo->status = skb->gdp_xo_status;
+}
+
 /* Get packet from user space buffer */
 static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 			    void *msg_control, struct iov_iter *from,
 			    int noblock, bool more)
 {
 	struct tun_pi pi = { 0, cpu_to_be16(ETH_P_IP) };
+	u32 gdph[2] = { 0, 0 };
 	struct sk_buff *skb;
 	size_t total_len = iov_iter_count(from);
 	size_t len = total_len, align = tun->align, linear;
@@ -1771,6 +1868,14 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 		len -= sizeof(pi);
 
 		if (!copy_from_iter_full(&pi, sizeof(pi), from))
+			return -EFAULT;
+	}
+
+	if (tun->gdp) {
+		if (len < sizeof(gdph))
+			return -EINVAL;
+		len -= sizeof(gdph);
+		if (!copy_from_iter_full(gdph, sizeof(gdph), from))
 			return -EFAULT;
 	}
 
@@ -1905,6 +2010,10 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 			goto drop;
 		}
 		skb->protocol = eth_type_trans(skb, tun->dev);
+		if (tun->gdp) {
+			skb->gdp_xo_flags = gdph[0];
+			skb->gdp_xo_status = gdph[1];
+		}
 		break;
 	}
 
@@ -1919,6 +2028,9 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	skb_reset_network_header(skb);
 	skb_probe_transport_header(skb);
 	skb_record_rx_queue(skb, tfile->queue_index);
+
+	if (tun->dev->features & NETIF_F_HW_ESP)
+		tap_ipsec_rx(tun, skb);
 
 	if (skb_xdp) {
 		struct bpf_prog *xdp_prog;
@@ -2119,6 +2231,19 @@ static ssize_t tun_put_user(struct tun_struct *tun,
 		}
 
 		if (copy_to_iter(&pi, sizeof(pi), iter) != sizeof(pi))
+			return -EFAULT;
+	}
+
+	if (tun->gdp) {
+		int gdph[3] = {
+			skb->gdp_xo_nsid,
+			skb->gdp_xo_link,
+			skb->gdp_xo_esphp ? (int)(skb->gdp_xo_esphp - skb->data) : 0,
+		};
+		if (iov_iter_count(iter) < sizeof(gdph))
+			return -EINVAL;
+		total += sizeof(gdph);
+		if (copy_to_iter(gdph, sizeof(gdph), iter) != sizeof(gdph))
 			return -EFAULT;
 	}
 
@@ -2847,6 +2972,7 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 		tun->flags = flags;
 		tun->txflt.count = 0;
 		tun->vnet_hdr_sz = sizeof(struct virtio_net_hdr);
+		tun->gdp = 0;
 
 		tun->align = NET_SKB_PAD;
 		tun->filter_attached = false;
@@ -2934,6 +3060,18 @@ static int set_offload(struct tun_struct *tun, unsigned long arg)
 	tun->dev->wanted_features |= features;
 	netdev_update_features(tun->dev);
 
+	return 0;
+}
+
+static int set_gdp(struct tun_struct *tun, unsigned long arg)
+{
+	if ((tun->flags & TUN_TYPE_MASK) != IFF_TAP)
+		return -EINVAL;
+	if (!(tun->flags & IFF_NAPI))
+		return -EINVAL;
+	tun->gdp = 1;
+	tun->dev->wanted_features |= NETIF_F_HW_ESP;
+	netdev_update_features(tun->dev);
 	return 0;
 }
 
@@ -3395,6 +3533,10 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 			goto unlock;
 		ret = open_related_ns(&net->ns, get_net_ns);
+		break;
+
+	case TUNSETGDP:
+		ret = set_gdp(tun, arg);
 		break;
 
 	default:

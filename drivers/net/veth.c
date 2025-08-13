@@ -18,6 +18,7 @@
 #include <net/rtnetlink.h>
 #include <net/dst.h>
 #include <net/xfrm.h>
+#include <net/esp.h>
 #include <net/xdp.h>
 #include <linux/veth.h>
 #include <linux/module.h>
@@ -303,8 +304,66 @@ static void __veth_xdp_flush(struct veth_rq *rq)
 	}
 }
 
+static void veth_ipsec_rx(struct net_device *dev, struct sk_buff *skb)
+{
+	struct sec_path *sp;
+	struct xfrm_offload *xo = NULL;
+	struct xfrm_state *xs = NULL;
+	struct ip_esp_hdr *esph = NULL;
+	uint8_t protocol = 0;
+	unsigned short family = 0;
+
+	switch (ntohs(skb->protocol)) {
+	case ETH_P_IP:
+		family = AF_INET;
+		protocol = ip_hdr(skb)->protocol;
+		break;
+	case ETH_P_IPV6:
+		family = AF_INET6;
+		protocol = ipv6_hdr(skb)->nexthdr;
+		break;
+	default:
+		return;
+	}
+
+	esph = ip_esp_hdr(skb);
+	if (protocol == IPPROTO_UDP) {
+		struct udphdr *udph = (struct udphdr *)esph;
+		/* XXX: */
+		if (ntohs(udph->source) != 4500 && ntohs(udph->dest) != 4500)
+			return;
+		esph = (struct ip_esp_hdr *)(udph + 1);
+		protocol = IPPROTO_ESP;
+	}
+
+	if (protocol != IPPROTO_ESP)
+		return;
+
+	xs = xfrm_state_lookup_byspi(dev_net(dev), esph->spi, family);
+	if (unlikely(!xs))
+		return;
+	if (xs->xso.type != XFRM_DEV_OFFLOAD_CRYPTO)
+		return;
+	if (xs->xso.dev != dev)
+		return;
+	xfrm_state_hold(xs);
+	sp = secpath_set(skb);
+	if (unlikely(!sp)) {
+		xfrm_state_put(xs);
+		return;
+	}
+	sp->xvec[sp->len++] = xs;
+	sp->olen++;
+	xo = xfrm_offload(skb);
+	xo->flags = skb->gdp_xo_flags;
+	xo->status = skb->gdp_xo_status;
+}
+
 static int veth_xdp_rx(struct veth_rq *rq, struct sk_buff *skb)
 {
+	if (skb->dev->features & NETIF_F_HW_ESP)
+		veth_ipsec_rx(skb->dev, skb);
+
 	if (unlikely(ptr_ring_produce(&rq->xdp_ring, skb))) {
 		dev_kfree_skb_any(skb);
 		return NET_RX_DROP;
@@ -369,6 +428,9 @@ static netdev_tx_t veth_xmit(struct sk_buff *skb, struct net_device *dev)
 		use_napi = rcu_access_pointer(rq->napi) &&
 			   veth_skb_is_eligible_for_gro(dev, rcv, skb);
 	}
+
+	if (rcv->features & NETIF_F_HW_ESP)
+		use_napi = true;
 
 	skb_tx_timestamp(skb);
 	if (likely(veth_forward_skb(rcv, skb, rq, use_napi) == NET_RX_SUCCESS)) {
@@ -1751,6 +1813,41 @@ static const struct xdp_metadata_ops veth_xdp_metadata_ops = {
 	.xmo_rx_vlan_tag		= veth_xdp_rx_vlan_tag,
 };
 
+static int veth_xfrmdev_state_add(struct xfrm_state *x, struct netlink_ext_ack *extack)
+{
+	return 0;
+}
+
+static void veth_xfrmdev_state_delete(struct xfrm_state *x)
+{
+}
+
+static void veth_xfrmdev_state_free(struct xfrm_state *x)
+{
+}
+
+static bool veth_xfrmdev_offload_ok(struct sk_buff *skb, struct xfrm_state *x)
+{
+	return true;
+}
+
+static void veth_xfrmdev_state_advance_esn(struct xfrm_state *x)
+{
+}
+
+static void veth_xfrmdev_state_update_curlft(struct xfrm_state *x)
+{
+}
+
+static const struct xfrmdev_ops veth_xfrmdev_ops = {
+	.xdo_dev_state_add		= veth_xfrmdev_state_add,
+	.xdo_dev_state_delete		= veth_xfrmdev_state_delete,
+	.xdo_dev_state_free		= veth_xfrmdev_state_free,
+	.xdo_dev_offload_ok		= veth_xfrmdev_offload_ok,
+	.xdo_dev_state_advance_esn	= veth_xfrmdev_state_advance_esn,
+	.xdo_dev_state_update_curlft	= veth_xfrmdev_state_update_curlft,
+};
+
 #define VETH_FEATURES (NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_HW_CSUM | \
 		       NETIF_F_RXCSUM | NETIF_F_SCTP_CRC | NETIF_F_HIGHDMA | \
 		       NETIF_F_GSO_SOFTWARE | NETIF_F_GSO_ENCAP_ALL | \
@@ -1768,6 +1865,7 @@ static void veth_setup(struct net_device *dev)
 
 	dev->netdev_ops = &veth_netdev_ops;
 	dev->xdp_metadata_ops = &veth_xdp_metadata_ops;
+	dev->xfrmdev_ops = &veth_xfrmdev_ops;
 	dev->ethtool_ops = &veth_ethtool_ops;
 	dev->features |= NETIF_F_LLTX;
 	dev->features |= VETH_FEATURES;
@@ -1781,8 +1879,8 @@ static void veth_setup(struct net_device *dev)
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 	dev->max_mtu = ETH_MAX_MTU;
 
-	dev->hw_features = VETH_FEATURES;
-	dev->hw_enc_features = VETH_FEATURES;
+	dev->hw_features = VETH_FEATURES | NETIF_F_HW_ESP;
+	dev->hw_enc_features = VETH_FEATURES | NETIF_F_HW_ESP;
 	dev->mpls_features = NETIF_F_HW_CSUM | NETIF_F_GSO_SOFTWARE;
 	netif_set_tso_max_size(dev, GSO_MAX_SIZE);
 }
