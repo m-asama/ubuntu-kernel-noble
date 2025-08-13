@@ -104,6 +104,139 @@ static struct device_type l2tpeth_type = {
 	.name = "l2tpeth",
 };
 
+static size_t l2tpeth_get_size(const struct net_device *dev)
+{
+	struct l2tp_eth *priv = netdev_priv(dev);
+	struct l2tp_session *session = priv->session;
+	struct l2tp_tunnel *tunnel = session->tunnel;
+	struct sock *sk = tunnel->sock;
+	size_t size = 0;
+
+	size += nla_total_size(sizeof(u8));					/* L2TP_ATTR_PROTO_VERSION */
+	size += nla_total_size(sizeof(u32));					/* L2TP_ATTR_CONN_ID */
+	size += nla_total_size(sizeof(u32));					/* L2TP_ATTR_PEER_CONN_ID */
+	size += nla_total_size(sizeof(u16));					/* L2TP_ATTR_ENCAP_TYPE */
+	if (sk && sk->sk_family == AF_INET) {
+		switch (tunnel->encap) {
+		case L2TP_ENCAPTYPE_UDP:
+			size += nla_total_size(sizeof(u8));			/* L2TP_ATTR_UDP_CSUM */
+			size += nla_total_size(sizeof(u16));			/* L2TP_ATTR_UDP_SPORT */
+			size += nla_total_size(sizeof(u16));			/* L2TP_ATTR_UDP_DPORT */
+		case L2TP_ENCAPTYPE_IP:
+			size += nla_total_size(sizeof(struct in_addr));		/* L2TP_ATTR_IP_SADDR */
+			size += nla_total_size(sizeof(struct in_addr));		/* L2TP_ATTR_IP_DADDR */
+			break;
+		}
+	}
+	if (sk && sk->sk_family == AF_INET6) {
+		switch (tunnel->encap) {
+		case L2TP_ENCAPTYPE_UDP:
+			size += nla_total_size(0);				/* L2TP_ATTR_UDP_ZERO_CSUM6_TX */
+			size += nla_total_size(0);				/* L2TP_ATTR_UDP_ZERO_CSUM6_RX */
+			size += nla_total_size(sizeof(u16));			/* L2TP_ATTR_UDP_SPORT */
+			size += nla_total_size(sizeof(u16));			/* L2TP_ATTR_UDP_DPORT */
+		case L2TP_ENCAPTYPE_IP:
+			size += nla_total_size(sizeof(struct in6_addr));	/* L2TP_ATTR_IP6_SADDR */
+			size += nla_total_size(sizeof(struct in6_addr));	/* L2TP_ATTR_IP6_DADDR */
+			break;
+		}
+	}
+	size += nla_total_size(sizeof(u32));					/* L2TP_ATTR_SESSION_ID */
+	size += nla_total_size(sizeof(u32));					/* L2TP_ATTR_PEER_SESSION_ID */
+	size += nla_total_size(sizeof(u16));					/* L2TP_ATTR_PW_TYPE */
+	if (session->cookie_len)
+		size += nla_total_size(session->cookie_len);			/* L2TP_ATTR_COOKIE */
+	if (session->peer_cookie_len)
+		size += nla_total_size(session->peer_cookie_len);		/* L2TP_ATTR_PEER_COOKIE */
+	size += nla_total_size(sizeof(u8));					/* L2TP_ATTR_RECV_SEQ */
+	size += nla_total_size(sizeof(u8));					/* L2TP_ATTR_SEND_SEQ */
+
+	return size;
+}
+
+static int l2tpeth_fill_info(struct sk_buff *skb, const struct net_device *dev)
+{
+	struct l2tp_eth *priv = netdev_priv(dev);
+	struct l2tp_session *session = priv->session;
+	struct l2tp_tunnel *tunnel = session->tunnel;
+	struct sock *sk = tunnel->sock;
+
+	if (nla_put_u8(skb, L2TP_ATTR_PROTO_VERSION, tunnel->version))
+		goto nla_put_failure;
+	if (nla_put_u32(skb, L2TP_ATTR_CONN_ID, tunnel->tunnel_id))
+		goto nla_put_failure;
+	if (nla_put_u32(skb, L2TP_ATTR_PEER_CONN_ID, tunnel->peer_tunnel_id))
+		goto nla_put_failure;
+	if (nla_put_u16(skb, L2TP_ATTR_ENCAP_TYPE, tunnel->encap))
+		goto nla_put_failure;
+	if (sk && sk->sk_family == AF_INET) {
+		struct inet_sock *inet = inet_sk(sk);
+		switch (tunnel->encap) {
+		case L2TP_ENCAPTYPE_UDP:
+			if (nla_put_u8(skb, L2TP_ATTR_UDP_CSUM, !sk->sk_no_check_tx))
+				goto nla_put_failure;
+			if (nla_put_u16(skb, L2TP_ATTR_UDP_SPORT, ntohs(inet->inet_sport)))
+				goto nla_put_failure;
+			if (nla_put_u16(skb, L2TP_ATTR_UDP_DPORT, ntohs(inet->inet_dport)))
+				goto nla_put_failure;
+		case L2TP_ENCAPTYPE_IP:
+			if (nla_put_in_addr(skb, L2TP_ATTR_IP_SADDR, inet->inet_saddr))
+				goto nla_put_failure;
+			if (nla_put_in_addr(skb, L2TP_ATTR_IP_DADDR, inet->inet_daddr))
+				goto nla_put_failure;
+			break;
+		}
+	}
+	if (sk && sk->sk_family == AF_INET6) {
+		struct inet_sock *inet = inet_sk(sk);
+		struct ipv6_pinfo *np = inet6_sk(sk);
+		switch (tunnel->encap) {
+		case L2TP_ENCAPTYPE_UDP:
+			if (udp_get_no_check6_tx(sk) && nla_put_flag(skb, L2TP_ATTR_UDP_ZERO_CSUM6_TX))
+				goto nla_put_failure;
+			if (udp_get_no_check6_rx(sk) && nla_put_flag(skb, L2TP_ATTR_UDP_ZERO_CSUM6_RX))
+				goto nla_put_failure;
+			if (nla_put_u16(skb, L2TP_ATTR_UDP_SPORT, ntohs(inet->inet_sport)))
+				goto nla_put_failure;
+			if (nla_put_u16(skb, L2TP_ATTR_UDP_DPORT, ntohs(inet->inet_dport)))
+				goto nla_put_failure;
+		case L2TP_ENCAPTYPE_IP:
+			if (nla_put_in6_addr(skb, L2TP_ATTR_IP6_SADDR, &np->saddr))
+				goto nla_put_failure;
+			if (nla_put_in6_addr(skb, L2TP_ATTR_IP6_DADDR, &sk->sk_v6_daddr))
+				goto nla_put_failure;
+			break;
+		}
+	}
+
+	if (nla_put_u32(skb, L2TP_ATTR_SESSION_ID, session->session_id))
+		goto nla_put_failure;
+	if (nla_put_u32(skb, L2TP_ATTR_PEER_SESSION_ID, session->peer_session_id))
+		goto nla_put_failure;
+	if (nla_put_u16(skb, L2TP_ATTR_PW_TYPE, session->pwtype))
+		goto nla_put_failure;
+	if (session->cookie_len && nla_put(skb, L2TP_ATTR_COOKIE, session->cookie_len, session->cookie))
+		goto nla_put_failure;
+	if (session->peer_cookie_len
+	 && nla_put(skb, L2TP_ATTR_PEER_COOKIE, session->peer_cookie_len, session->peer_cookie))
+		goto nla_put_failure;
+	if (nla_put_u8(skb, L2TP_ATTR_RECV_SEQ, session->recv_seq))
+		goto nla_put_failure;
+	if (nla_put_u8(skb, L2TP_ATTR_SEND_SEQ, session->send_seq))
+		goto nla_put_failure;
+
+	return 0;
+
+nla_put_failure:
+	return -EMSGSIZE;
+}
+
+static struct rtnl_link_ops l2tpeth_link_ops __read_mostly = {
+	.kind		= "l2tpeth",
+	.get_size	= l2tpeth_get_size,
+	.fill_info	= l2tpeth_fill_info,
+};
+
 static void l2tp_eth_dev_setup(struct net_device *dev)
 {
 	SET_NETDEV_DEVTYPE(dev, &l2tpeth_type);
@@ -269,6 +402,7 @@ static int l2tp_eth_create(struct net *net, struct l2tp_tunnel *tunnel,
 	}
 
 	dev_net_set(dev, net);
+	dev->rtnl_link_ops = &l2tpeth_link_ops;
 	dev->min_mtu = 0;
 	dev->max_mtu = ETH_MAX_MTU;
 	l2tp_eth_adjust_mtu(tunnel, session, dev);
