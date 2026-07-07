@@ -374,6 +374,9 @@ static netdev_tx_t veth_xmit(struct sk_buff *skb, struct net_device *dev)
 			   veth_skb_is_eligible_for_gro(dev, rcv, skb);
 	}
 
+	if (rcv->features & NETIF_F_HW_ESP)
+		use_napi = true;
+
 	skb_tx_timestamp(skb);
 	if (likely(veth_forward_skb(rcv, skb, rq, use_napi) == NET_RX_SUCCESS)) {
 		if (!use_napi)
@@ -1755,6 +1758,15 @@ static const struct xdp_metadata_ops veth_xdp_metadata_ops = {
 	.xmo_rx_vlan_tag		= veth_xdp_rx_vlan_tag,
 };
 
+static const struct xfrmdev_ops veth_xfrmdev_ops = {
+	.xdo_dev_state_add		= gdp_xfrmdev_state_add,
+	.xdo_dev_state_delete		= gdp_xfrmdev_state_delete,
+	.xdo_dev_state_free		= gdp_xfrmdev_state_free,
+	.xdo_dev_offload_ok		= gdp_xfrmdev_offload_ok,
+	.xdo_dev_state_advance_esn	= gdp_xfrmdev_state_advance_esn,
+	.xdo_dev_state_update_curlft	= gdp_xfrmdev_state_update_curlft,
+};
+
 #define VETH_FEATURES (NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_HW_CSUM | \
 		       NETIF_F_RXCSUM | NETIF_F_SCTP_CRC | NETIF_F_HIGHDMA | \
 		       NETIF_F_GSO_SOFTWARE | NETIF_F_GSO_ENCAP_ALL | \
@@ -1772,6 +1784,7 @@ static void veth_setup(struct net_device *dev)
 
 	dev->netdev_ops = &veth_netdev_ops;
 	dev->xdp_metadata_ops = &veth_xdp_metadata_ops;
+	dev->xfrmdev_ops = &veth_xfrmdev_ops;
 	dev->ethtool_ops = &veth_ethtool_ops;
 	dev->features |= NETIF_F_LLTX;
 	dev->features |= VETH_FEATURES;
@@ -1785,8 +1798,8 @@ static void veth_setup(struct net_device *dev)
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 	dev->max_mtu = ETH_MAX_MTU;
 
-	dev->hw_features = VETH_FEATURES;
-	dev->hw_enc_features = VETH_FEATURES;
+	dev->hw_features = VETH_FEATURES | NETIF_F_HW_ESP;
+	dev->hw_enc_features = VETH_FEATURES | NETIF_F_HW_ESP;
 	dev->mpls_features = NETIF_F_HW_CSUM | NETIF_F_GSO_SOFTWARE;
 	netif_set_tso_max_size(dev, GSO_MAX_SIZE);
 }

@@ -33,6 +33,8 @@ struct ppp_channel_ops {
 	int	(*fill_forward_path)(struct net_device_path_ctx *,
 				     struct net_device_path *,
 				     const struct ppp_channel *);
+	int	(*nl_fill_info)(struct sk_buff *skb, struct ppp_channel *chan);
+	int	(*setup_xfrmdev)(struct net_device *dev);
 };
 
 struct ppp_channel {
@@ -44,6 +46,7 @@ struct ppp_channel {
 	int		speed;		/* transfer rate (bytes/second) */
 	/* the following is not used at present */
 	int		latency;	/* overhead time in milliseconds */
+	int		gdp;
 };
 
 #ifdef __KERNEL__

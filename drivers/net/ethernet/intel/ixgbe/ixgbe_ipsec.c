@@ -571,6 +571,16 @@ static int ixgbe_ipsec_add_sa(struct xfrm_state *xs,
 	int ret;
 	int i;
 
+	/*
+	 * XXX: gdp
+	 * As xfrm_dev_state_add now allows xfrm_state with encap set, it is up
+	 * to the driver to reject them if not supported.
+	 */
+	if (xs->encap) {
+		NL_SET_ERR_MSG(extack, "Encapsulation can't be offloaded");
+		return -EINVAL;
+	}
+
 	if (xs->id.proto != IPPROTO_ESP && xs->id.proto != IPPROTO_AH) {
 		NL_SET_ERR_MSG_MOD(extack, "Unsupported protocol for ipsec offload");
 		return -EINVAL;

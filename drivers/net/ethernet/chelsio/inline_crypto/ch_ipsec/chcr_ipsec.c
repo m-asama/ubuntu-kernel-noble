@@ -231,6 +231,16 @@ static int ch_ipsec_xfrm_add_state(struct xfrm_state *x,
 	struct ipsec_sa_entry *sa_entry;
 	int res = 0;
 
+	/*
+	 * XXX: gdp
+	 * As xfrm_dev_state_add now allows xfrm_state with encap set, it is up
+	 * to the driver to reject them if not supported.
+	 */
+	if (x->encap) {
+		NL_SET_ERR_MSG(extack, "Encapsulation can't be offloaded");
+		return -EINVAL;
+	}
+
 	if (x->props.aalgo != SADB_AALG_NONE) {
 		NL_SET_ERR_MSG_MOD(extack, "Cannot offload authenticated xfrm states");
 		return -EINVAL;

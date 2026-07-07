@@ -268,6 +268,16 @@ static int ixgbevf_ipsec_add_sa(struct xfrm_state *xs,
 	u16 sa_idx;
 	int ret;
 
+	/*
+	 * XXX: gdp
+	 * As xfrm_dev_state_add now allows xfrm_state with encap set, it is up
+	 * to the driver to reject them if not supported.
+	 */
+	if (xs->encap) {
+		NL_SET_ERR_MSG(extack, "Encapsulation can't be offloaded");
+		return -EINVAL;
+	}
+
 	adapter = netdev_priv(dev);
 	ipsec = adapter->ipsec;
 

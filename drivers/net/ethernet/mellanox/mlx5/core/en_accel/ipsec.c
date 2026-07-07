@@ -773,6 +773,16 @@ static int mlx5e_xfrm_add_state(struct xfrm_state *x,
 	gfp_t gfp;
 	int err;
 
+	/*
+	 * XXX: gdp
+	 * As xfrm_dev_state_add now allows xfrm_state with encap set, it is up
+	 * to the driver to reject them if not supported.
+	 */
+	if (x->encap) {
+		NL_SET_ERR_MSG(extack, "Encapsulation can't be offloaded");
+		return -EINVAL;
+	}
+
 	priv = netdev_priv(netdev);
 	if (!priv->ipsec)
 		return -EOPNOTSUPP;

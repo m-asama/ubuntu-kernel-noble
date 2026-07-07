@@ -6498,6 +6498,16 @@ static int cxgb4_xfrm_add_state(struct xfrm_state *x,
 	struct adapter *adap = netdev2adap(x->xso.dev);
 	int ret;
 
+	/*
+	 * XXX: gdp
+	 * As xfrm_dev_state_add now allows xfrm_state with encap set, it is up
+	 * to the driver to reject them if not supported.
+	 */
+	if (x->encap) {
+		NL_SET_ERR_MSG(extack, "Encapsulation can't be offloaded");
+		return -EINVAL;
+	}
+
 	if (!mutex_trylock(&uld_mutex)) {
 		NL_SET_ERR_MSG_MOD(extack, "crypto uld critical resource is under use");
 		return -EBUSY;

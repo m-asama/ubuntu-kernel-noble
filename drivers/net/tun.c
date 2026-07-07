@@ -77,6 +77,7 @@
 #include <net/ax25.h>
 #include <net/rose.h>
 #include <net/6lowpan.h>
+#include <net/xfrm.h>
 
 #include <linux/uaccess.h>
 #include <linux/proc_fs.h>
@@ -189,6 +190,7 @@ struct tun_struct {
 
 	int			align;
 	int			vnet_hdr_sz;
+	unsigned long		gdp;
 	int			sndbuf;
 	struct tap_filter	txflt;
 	struct sock_fprog	fprog;
@@ -1370,6 +1372,15 @@ static void tun_flow_uninit(struct tun_struct *tun)
 	tun_flow_flush(tun);
 }
 
+static const struct xfrmdev_ops tap_xfrmdev_ops = {
+	.xdo_dev_state_add		= gdp_xfrmdev_state_add,
+	.xdo_dev_state_delete		= gdp_xfrmdev_state_delete,
+	.xdo_dev_state_free		= gdp_xfrmdev_state_free,
+	.xdo_dev_offload_ok		= gdp_xfrmdev_offload_ok,
+	.xdo_dev_state_advance_esn	= gdp_xfrmdev_state_advance_esn,
+	.xdo_dev_state_update_curlft	= gdp_xfrmdev_state_update_curlft,
+};
+
 #define MIN_MTU 68
 #define MAX_MTU 65535
 
@@ -1395,6 +1406,9 @@ static void tun_net_initialize(struct net_device *dev)
 
 	case IFF_TAP:
 		dev->netdev_ops = &tap_netdev_ops;
+		dev->xfrmdev_ops = &tap_xfrmdev_ops;
+		dev->hw_features |= NETIF_F_HW_ESP;
+		dev->hw_enc_features |= NETIF_F_HW_ESP;
 		/* Ethernet TAP Device */
 		ether_setup(dev);
 		dev->priv_flags &= ~IFF_TX_SKB_SHARING;
@@ -1752,6 +1766,7 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 			    int noblock, bool more)
 {
 	struct tun_pi pi = { 0, cpu_to_be16(ETH_P_IP) };
+	u32 gdph[2] = { 0, 0 };
 	struct sk_buff *skb;
 	size_t total_len = iov_iter_count(from);
 	size_t len = total_len, align = tun->align, linear;
@@ -1771,6 +1786,15 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 		len -= sizeof(pi);
 
 		if (!copy_from_iter_full(&pi, sizeof(pi), from))
+			return -EFAULT;
+	}
+
+	/* XXX: gdp */
+	if (tun->gdp) {
+		if (len < sizeof(gdph))
+			return -EINVAL;
+		len -= sizeof(gdph);
+		if (!copy_from_iter_full(gdph, sizeof(gdph), from))
 			return -EFAULT;
 	}
 
@@ -1905,6 +1929,11 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 			goto drop;
 		}
 		skb->protocol = eth_type_trans(skb, tun->dev);
+		/* XXX: gdp */
+		if (tun->gdp) {
+			skb->gdp_xo_flags = gdph[0];
+			skb->gdp_xo_status = gdph[1];
+		}
 		break;
 	}
 
@@ -2119,6 +2148,20 @@ static ssize_t tun_put_user(struct tun_struct *tun,
 		}
 
 		if (copy_to_iter(&pi, sizeof(pi), iter) != sizeof(pi))
+			return -EFAULT;
+	}
+
+	/* XXX: gdp */
+	if (tun->gdp) {
+		int gdph[3] = {
+			skb->gdp_xo_nsid,
+			skb->gdp_xo_link,
+			skb->gdp_xo_esphp ? (int)(skb->gdp_xo_esphp - skb->data) : 0,
+		};
+		if (iov_iter_count(iter) < sizeof(gdph))
+			return -EINVAL;
+		total += sizeof(gdph);
+		if (copy_to_iter(gdph, sizeof(gdph), iter) != sizeof(gdph))
 			return -EFAULT;
 	}
 
@@ -2400,6 +2443,9 @@ static int tun_fill_info(struct sk_buff *skb, const struct net_device *dev)
 				tun->numdisabled))
 			goto nla_put_failure;
 	}
+	if (tun->gdp)
+		if (nla_put_u64_64bit(skb, IFLA_TUN_GDP, tun->gdp, IFLA_TUN_PAD))
+			goto nla_put_failure;
 
 	return 0;
 
@@ -2847,6 +2893,7 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 		tun->flags = flags;
 		tun->txflt.count = 0;
 		tun->vnet_hdr_sz = sizeof(struct virtio_net_hdr);
+		tun->gdp = 0;
 
 		tun->align = NET_SKB_PAD;
 		tun->filter_attached = false;
@@ -2934,6 +2981,18 @@ static int set_offload(struct tun_struct *tun, unsigned long arg)
 	tun->dev->wanted_features |= features;
 	netdev_update_features(tun->dev);
 
+	return 0;
+}
+
+static int set_gdp(struct tun_struct *tun, unsigned long arg)
+{
+	if ((tun->flags & TUN_TYPE_MASK) != IFF_TAP)
+		return -EINVAL;
+	if (!(tun->flags & IFF_NAPI))
+		return -EINVAL;
+	tun->gdp = arg;
+	tun->dev->wanted_features |= NETIF_F_HW_ESP;
+	netdev_update_features(tun->dev);
 	return 0;
 }
 
@@ -3395,6 +3454,10 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 			goto unlock;
 		ret = open_related_ns(&net->ns, get_net_ns);
+		break;
+
+	case TUNSETGDP:
+		ret = set_gdp(tun, arg);
 		break;
 
 	default:

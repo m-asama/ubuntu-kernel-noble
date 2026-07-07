@@ -1,4 +1,4 @@
-linux (6.8.0-136.136) noble; urgency=medium
+linux (6.8.0-136.136+gdp1) noble; urgency=medium
 
   * noble/linux: 6.8.0-136.136 -proposed tracker (LP: #2158930)
 

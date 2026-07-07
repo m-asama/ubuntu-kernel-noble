@@ -94,6 +94,12 @@ static struct sk_buff *esp6_gro_receive(struct list_head *head,
 		xo = xfrm_offload(skb);
 		if (!xo)
 			goto out_reset;
+
+		/* XXX: gdp */
+		if (x->xso.type == XFRM_DEV_OFFLOAD_CRYPTO) {
+			xo->flags |= skb->gdp_xo_flags;
+			xo->status |= skb->gdp_xo_status;
+		}
 	}
 
 	xo->flags |= XFRM_GRO;
@@ -145,6 +151,13 @@ static void esp6_gso_encap(struct xfrm_state *x, struct sk_buff *skb)
 	esph->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output.low);
 
 	xo->proto = proto;
+
+	/* XXX: gdp */
+	if (x->xso.dev) {
+		skb->gdp_xo_nsid = peernet2id(&init_net, dev_net(x->xso.dev));
+		skb->gdp_xo_link = x->xso.dev->ifindex;
+		skb->gdp_xo_esphp = (unsigned char *)esph;
+	}
 }
 
 static struct sk_buff *xfrm6_tunnel_gso_segment(struct xfrm_state *x,

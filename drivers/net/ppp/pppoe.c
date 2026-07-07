@@ -77,6 +77,8 @@
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
 #include <net/sock.h>
+#include <net/gro.h>
+#include <net/xfrm.h>
 
 #include <linux/uaccess.h>
 
@@ -534,6 +536,15 @@ static struct proto pppoe_sk_proto __read_mostly = {
 	.obj_size = sizeof(struct pppox_sock),
 };
 
+static const struct xfrmdev_ops pppoe_xfrmdev_ops = {
+	.xdo_dev_state_add		= gdp_xfrmdev_state_add,
+	.xdo_dev_state_delete		= gdp_xfrmdev_state_delete,
+	.xdo_dev_state_free		= gdp_xfrmdev_state_free,
+	.xdo_dev_offload_ok		= gdp_xfrmdev_offload_ok,
+	.xdo_dev_state_advance_esn	= gdp_xfrmdev_state_advance_esn,
+	.xdo_dev_state_update_curlft	= gdp_xfrmdev_state_update_curlft,
+};
+
 /***********************************************************************
  *
  * Initialize a new struct sock.
@@ -832,6 +843,10 @@ static int pppoe_ioctl(struct socket *sock, unsigned int cmd,
 		err = 0;
 		break;
 
+	case PPPOEIOCSGDP:
+		po->chan.gdp = 1;
+		break;
+
 	default:
 		err = -ENOTTY;
 	}
@@ -1001,9 +1016,44 @@ static int pppoe_fill_forward_path(struct net_device_path_ctx *ctx,
 	return 0;
 }
 
+static int pppoe_nl_fill_info(struct sk_buff *skb,
+			      struct ppp_channel *chan)
+{
+	struct sock *sk = chan->private;
+	struct pppox_sock *po = pppox_sk(sk);
+	struct net_device *dev = po->pppoe_dev;
+
+	if (sock_flag(sk, SOCK_DEAD) ||
+	    !(sk->sk_state & PPPOX_CONNECTED) || !dev)
+		return 0;
+
+	if (nla_put_u16(skb, IFLA_PPP_PPPOE_SID, po->pppoe_pa.sid))
+		goto nla_put_failure;
+	if (nla_put(skb, IFLA_PPP_PPPOE_REMOTE, sizeof(po->pppoe_pa.remote), &po->pppoe_pa.remote))
+		goto nla_put_failure;
+	if (nla_put_u32(skb, IFLA_PPP_PPPOE_DEV, po->pppoe_dev->ifindex))
+		goto nla_put_failure;
+
+	return 0;
+
+nla_put_failure:
+	return -EMSGSIZE;
+}
+
+static int pppoe_setup_xfrmdev(struct net_device *dev)
+{
+	dev->xfrmdev_ops = &pppoe_xfrmdev_ops;
+	dev->hw_features |= NETIF_F_HW_ESP;
+	dev->hw_enc_features |= NETIF_F_HW_ESP;
+	dev->features |= NETIF_F_HW_ESP;
+	return 0;
+}
+
 static const struct ppp_channel_ops pppoe_chan_ops = {
 	.start_xmit = pppoe_xmit,
 	.fill_forward_path = pppoe_fill_forward_path,
+	.nl_fill_info = pppoe_nl_fill_info,
+	.setup_xfrmdev = pppoe_setup_xfrmdev,
 };
 
 static int pppoe_recvmsg(struct socket *sock, struct msghdr *m,
@@ -1178,6 +1228,90 @@ static struct pernet_operations pppoe_net_ops = {
 	.size = sizeof(struct pppoe_net),
 };
 
+static struct sk_buff *pppoe_gro_receive(struct list_head *head, struct sk_buff *skb)
+{
+	const struct packet_offload *ptype;
+	unsigned int hlen, off_pppoe;
+	struct sk_buff *pp = NULL;
+	struct pppoe_hdr *ph;
+	__be16 *ppp_proto;
+	__be16 type;
+	int flush = 1;
+
+	off_pppoe = skb_gro_offset(skb);
+	hlen = off_pppoe + sizeof(*ph) + sizeof(*ppp_proto);
+	ph = skb_gro_header(skb, hlen, off_pppoe);
+	if (unlikely(!ph))
+		goto out;
+	ppp_proto = (__be16 *)(ph + 1);
+
+	NAPI_GRO_CB(skb)->network_offsets[NAPI_GRO_CB(skb)->encap_mark] = hlen;
+
+	switch (ntohs(*ppp_proto)) {
+	case PPP_IP:
+		type = htons(ETH_P_IP);
+		break;
+	case PPP_IPV6:
+		type = htons(ETH_P_IPV6);
+		break;
+	default:
+		goto out;
+	}
+
+	ptype = gro_find_receive_by_type(type);
+	if (!ptype || !ptype->callbacks.gro_receive)
+		goto out;
+
+	flush = 0;
+
+	skb_gro_pull(skb, sizeof(*ph) + sizeof(*ppp_proto));
+	skb_gro_postpull_rcsum(skb, ph, sizeof(*ph) + sizeof(*ppp_proto));
+
+	pp = ptype->callbacks.gro_receive(head, skb);
+
+out:
+	skb_gro_flush_final(skb, pp, flush);
+
+	return pp;
+}
+
+static int pppoe_gro_complete(struct sk_buff *skb, int nhoff)
+{
+	struct pppoe_hdr *ph = (struct pppoe_hdr *)(skb->data + nhoff);
+	__be16 *ppp_proto = (__be16 *)(ph + 1);
+	struct packet_offload *ptype;
+	__be16 type;
+	int err = -ENOENT;
+
+	switch (ntohs(*ppp_proto)) {
+	case PPP_IP:
+		type = htons(ETH_P_IP);
+		break;
+	case PPP_IPV6:
+		type = htons(ETH_P_IPV6);
+		break;
+	default:
+		goto out;
+	}
+
+	ptype = gro_find_receive_by_type(type);
+	if (!ptype || !ptype->callbacks.gro_complete)
+		goto out;
+
+	err = ptype->callbacks.gro_complete(skb, nhoff + sizeof(*ph) + sizeof(*ppp_proto));
+
+out:
+	return err;
+}
+
+static struct packet_offload pppoe_offload __read_mostly = {
+	.type = cpu_to_be16(ETH_P_PPP_SES),
+	.callbacks = {
+		.gro_receive  = pppoe_gro_receive,
+		.gro_complete = pppoe_gro_complete,
+	},
+};
+
 static int __init pppoe_init(void)
 {
 	int err;
@@ -1194,6 +1328,7 @@ static int __init pppoe_init(void)
 	if (err)
 		goto out_unregister_pppoe_proto;
 
+	dev_add_offload(&pppoe_offload);
 	dev_add_pack(&pppoes_ptype);
 	dev_add_pack(&pppoed_ptype);
 	register_netdevice_notifier(&pppoe_notifier);
@@ -1213,6 +1348,7 @@ static void __exit pppoe_exit(void)
 	unregister_netdevice_notifier(&pppoe_notifier);
 	dev_remove_pack(&pppoed_ptype);
 	dev_remove_pack(&pppoes_ptype);
+	dev_remove_offload(&pppoe_offload);
 	unregister_pppox_proto(PX_PROTO_OE);
 	proto_unregister(&pppoe_sk_proto);
 	unregister_pernet_device(&pppoe_net_ops);

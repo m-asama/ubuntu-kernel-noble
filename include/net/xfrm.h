@@ -1951,6 +1951,13 @@ static inline void xfrm_states_delete(struct xfrm_state **states, int n)
 
 void __init xfrm_dev_init(void);
 
+int gdp_xfrmdev_state_add(struct xfrm_state *x, struct netlink_ext_ack *extack);
+void gdp_xfrmdev_state_delete(struct xfrm_state *x);
+void gdp_xfrmdev_state_free(struct xfrm_state *x);
+bool gdp_xfrmdev_offload_ok(struct sk_buff *skb, struct xfrm_state *x);
+void gdp_xfrmdev_state_advance_esn(struct xfrm_state *x);
+void gdp_xfrmdev_state_update_curlft(struct xfrm_state *x);
+
 #ifdef CONFIG_XFRM_OFFLOAD
 void xfrm_dev_resume(struct sk_buff *skb);
 void xfrm_dev_backlog(struct softnet_data *sd);

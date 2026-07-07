@@ -19,6 +19,114 @@
 #include <net/xfrm.h>
 #include <linux/notifier.h>
 
+int gdp_xfrmdev_state_add(struct xfrm_state *x, struct netlink_ext_ack *extack)
+{
+	if (x->props.mode != XFRM_MODE_TUNNEL) {
+		NL_SET_ERR_MSG(extack, "GDP doesn't support other than tunnel mode");
+		return -EINVAL;
+	}
+
+	switch (x->props.family) {
+	case AF_INET:
+		if (x->encap && x->encap->encap_type != UDP_ENCAP_ESPINUDP) {
+			NL_SET_ERR_MSG(extack, "GDP doesn't support encapsulation other than UDP");
+			return -EINVAL;
+		}
+		break;
+	case AF_INET6:
+		if (x->encap) {
+			NL_SET_ERR_MSG(extack, "GDP doesn't support encapsulation");
+			return -EINVAL;
+		}
+		break;
+	default:
+		NL_SET_ERR_MSG(extack, "GDP doesn't support this address family");
+		return -EINVAL;
+	}
+
+	if (x->calg) {
+		NL_SET_ERR_MSG(extack, "GDP doesn't support compression");
+		return -EINVAL;
+	}
+
+	if (x->aead) {
+		int found = 0;
+		if (!strcmp(x->aead->alg_name, "rfc4106(gcm(aes))")) {
+			if (x->aead->alg_key_len == 128 + 32)
+				found++;
+			if (x->aead->alg_key_len == 192 + 32)
+				found++;
+			if (x->aead->alg_key_len == 256 + 32)
+				found++;
+		}
+		if (!found) {
+			NL_SET_ERR_MSG(extack, "GDP doesn't support this aead");
+			return -EINVAL;
+		}
+	}
+
+	if (x->ealg) {
+		int found = 0;
+		if (!strcmp(x->ealg->alg_name, "cbc(aes)")) {
+			if (x->ealg->alg_key_len == 128)
+				found++;
+			if (x->ealg->alg_key_len == 192)
+				found++;
+			if (x->ealg->alg_key_len == 256)
+				found++;
+		}
+		if (!found) {
+			NL_SET_ERR_MSG(extack, "GDP doesn't support this encryption");
+			return -EINVAL;
+		}
+	}
+
+	if (x->aalg) {
+		int found = 0;
+		if (!strcmp(x->aalg->alg_name, "hmac(sha1)"))
+			found++;
+		if (!strcmp(x->aalg->alg_name, "hmac(sha256)"))
+			found++;
+		if (!strcmp(x->aalg->alg_name, "hmac(sha384)"))
+			found++;
+		if (!strcmp(x->aalg->alg_name, "hmac(sha512)"))
+			found++;
+		if (!found) {
+			NL_SET_ERR_MSG(extack, "GDP doesn't support this authentication");
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gdp_xfrmdev_state_add);
+
+void gdp_xfrmdev_state_delete(struct xfrm_state *x)
+{
+}
+EXPORT_SYMBOL_GPL(gdp_xfrmdev_state_delete);
+
+void gdp_xfrmdev_state_free(struct xfrm_state *x)
+{
+}
+EXPORT_SYMBOL_GPL(gdp_xfrmdev_state_free);
+
+bool gdp_xfrmdev_offload_ok(struct sk_buff *skb, struct xfrm_state *x)
+{
+	return true;
+}
+EXPORT_SYMBOL_GPL(gdp_xfrmdev_offload_ok);
+
+void gdp_xfrmdev_state_advance_esn(struct xfrm_state *x)
+{
+}
+EXPORT_SYMBOL_GPL(gdp_xfrmdev_state_advance_esn);
+
+void gdp_xfrmdev_state_update_curlft(struct xfrm_state *x)
+{
+}
+EXPORT_SYMBOL_GPL(gdp_xfrmdev_state_update_curlft);
+
 #ifdef CONFIG_XFRM_OFFLOAD
 static void __xfrm_transport_prep(struct xfrm_state *x, struct sk_buff *skb,
 				  unsigned int hsize)
@@ -255,11 +363,19 @@ int xfrm_dev_state_add(struct net *net, struct xfrm_state *x,
 
 	is_packet_offload = xuo->flags & XFRM_OFFLOAD_PACKET;
 
-	/* We don't yet support UDP encapsulation and TFC padding. */
-	if ((!is_packet_offload && x->encap) || x->tfcpad) {
-		NL_SET_ERR_MSG(extack, "Encapsulation and TFC padding can't be offloaded");
+	/* We don't yet support TFC padding. */
+	if (x->tfcpad) {
+		NL_SET_ERR_MSG(extack, "TFC padding can't be offloaded");
 		return -EINVAL;
 	}
+
+	/*
+	 * XXX: gdp
+	 * For supporting UDP encapsulation in GDP, xfrm_dev_state_add accepts
+	 * xfrm_state with encap set. Drivers are responsible for rejecting
+	 * such states in their xdo_dev_state_add implementation if encap is
+	 * not supported.
+	 */
 
 	dev = dev_get_by_index(net, xuo->ifindex);
 	if (!dev) {

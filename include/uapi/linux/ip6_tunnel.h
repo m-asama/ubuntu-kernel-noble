@@ -23,6 +23,8 @@
 #define IP6_TNL_F_USE_ORIG_FWMARK 0x20
 /* allow remote endpoint on the local node */
 #define IP6_TNL_F_ALLOW_LOCAL_REMOTE 0x40
+/* gdp */
+#define IP6_TNL_F_GDP 0x80
 
 struct ip6_tnl_parm {
 	char name[IFNAMSIZ];	/* name of tunnel device */

@@ -1525,6 +1525,9 @@ static void ip6_tnl_link_config(struct ip6_tnl *t)
 			WRITE_ONCE(dev->mtu, mtu);
 		}
 	}
+
+	if ((p->flags & IP6_TNL_F_GDP) && !(dev->features & NETIF_F_HW_ESP))
+		dev->features |= NETIF_F_HW_ESP;
 }
 
 /**
@@ -1830,6 +1833,15 @@ static const struct net_device_ops ip6_tnl_netdev_ops = {
 	.ndo_get_iflink = ip6_tnl_get_iflink,
 };
 
+static const struct xfrmdev_ops ip6_tnl_xfrmdev_ops = {
+	.xdo_dev_state_add		= gdp_xfrmdev_state_add,
+	.xdo_dev_state_delete		= gdp_xfrmdev_state_delete,
+	.xdo_dev_state_free		= gdp_xfrmdev_state_free,
+	.xdo_dev_offload_ok		= gdp_xfrmdev_offload_ok,
+	.xdo_dev_state_advance_esn	= gdp_xfrmdev_state_advance_esn,
+	.xdo_dev_state_update_curlft	= gdp_xfrmdev_state_update_curlft,
+};
+
 #define IPXIPX_FEATURES (NETIF_F_SG |		\
 			 NETIF_F_FRAGLIST |	\
 			 NETIF_F_HIGHDMA |	\
@@ -1847,6 +1859,7 @@ static const struct net_device_ops ip6_tnl_netdev_ops = {
 static void ip6_tnl_dev_setup(struct net_device *dev)
 {
 	dev->netdev_ops = &ip6_tnl_netdev_ops;
+	dev->xfrmdev_ops = &ip6_tnl_xfrmdev_ops;
 	dev->header_ops = &ip_tunnel_header_ops;
 	dev->needs_free_netdev = true;
 	dev->priv_destructor = ip6_dev_free;
@@ -1859,6 +1872,9 @@ static void ip6_tnl_dev_setup(struct net_device *dev)
 
 	dev->features		|= IPXIPX_FEATURES;
 	dev->hw_features	|= IPXIPX_FEATURES;
+
+	dev->hw_features |= NETIF_F_HW_ESP;
+	dev->hw_enc_features |= NETIF_F_HW_ESP;
 
 	/* This perm addr will be used as interface identifier by IPv6 */
 	dev->addr_assign_type = NET_ADDR_RANDOM;
